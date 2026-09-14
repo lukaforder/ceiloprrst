@@ -1,26 +1,31 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "clipsort",
+  "productName": "ceiloprrst",
   "version": "0.1.0",
-  "identifier": "com.tauri.dev",
+  "identifier": "com.ceiloprrst.dev",
   "build": {
-    "frontendDist": "../public",
-    "devUrl": "http://localhost:5173",
     "beforeDevCommand": "yarn dev",
-    "beforeBuildCommand": "yarn build"
+    "beforeBuildCommand": "yarn build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../build"
   },
   "app": {
     "windows": [
       {
-        "title": "clipsort",
-        "width": 800,
-        "height": 600,
+        "title": "ceiloprrst",
+        "width": 1366,
+        "height": 768,
         "resizable": true,
+        "center": true,
         "fullscreen": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
     }
   },
   "bundle": {

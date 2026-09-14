@@ -1,21 +1,26 @@
 <script lang="ts">
-	import type { ComponentProps } from "svelte";
+	import { Pagination as PaginationPrimitive } from "bits-ui";
+	import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
+	import { buttonVariants } from "$lib/components/ui/button/index.js";
 	import { cn } from "$lib/utils.js";
-	import { PaginationLink } from "./index.js";
-	import { HugeiconsIcon } from "@hugeicons/svelte"
-	import { ArrowLeft01Icon } from '@hugeicons/core-free-icons';
 
-	type PaginationPreviousProps = ComponentProps<typeof PaginationLink>;
-
-	let { class: className, ...restProps }: PaginationPreviousProps = $props();
+	let {
+		ref = $bindable(null),
+		class: className,
+		...restProps
+	}: PaginationPrimitive.PrevButtonProps = $props();
 </script>
 
-<PaginationLink
+<PaginationPrimitive.PrevButton
+	bind:ref
 	aria-label="Go to previous page"
-	size="default"
-	class={cn("pl-1.5!", className)}
+	class={cn(
+		buttonVariants({ variant: "ghost", size: "default" }),
+		"pl-2!",
+		className
+	)}
 	{...restProps}
 >
-	<HugeiconsIcon icon={ArrowLeft01Icon} strokeWidth={2} data-icon="inline-start" />
-	<span class="cn-pagination-previous-text hidden sm:block">Previous</span>
-</PaginationLink>
+	<ChevronLeftIcon data-icon="inline-start" class="cn-rtl-flip" />
+	<span class="hidden sm:block">Previous</span>
+</PaginationPrimitive.PrevButton>

@@ -1,10 +1,10 @@
 <script lang="ts">
-	import { RangeCalendar as RangeCalendarPrimitive } from "bits-ui";
-	import * as RangeCalendar from "./index.js";
-	import { cn, type WithoutChildrenOrChild } from "$lib/utils.js";
-	import type { ButtonVariant } from "$lib/components/ui/button/index.js";
-	import type { Snippet } from "svelte";
 	import { isEqualMonth, type DateValue } from "@internationalized/date";
+	import { RangeCalendar as RangeCalendarPrimitive } from "bits-ui";
+	import type { ButtonVariant } from "$lib/components/ui/button/index.js";
+	import { cn, type WithoutChildrenOrChild } from "$lib/utils.js";
+	import * as RangeCalendar from "./index.js";
+	import type { Snippet } from "svelte";
 
 	let {
 		ref = $bindable(null),
@@ -46,7 +46,7 @@
 	{weekdayFormat}
 	{disableDaysOutsideMonth}
 	class={cn(
-		"p-2 [--cell-radius:var(--radius-md)] [--cell-size:--spacing(7)] bg-background group/calendar p-3 [[data-slot=card-content]_&]:bg-transparent [[data-slot=popover-content]_&]:bg-transparent",
+		"p-3 [--cell-radius:0] [--cell-size:--spacing(8)] group/calendar bg-background p-3 [[data-slot=card-content]_&]:bg-transparent [[data-slot=popover-content]_&]:bg-transparent",
 		className
 	)}
 	{locale}
@@ -79,7 +79,7 @@
 					<RangeCalendar.Grid>
 						<RangeCalendar.GridHead>
 							<RangeCalendar.GridRow class="select-none">
-								{#each weekdays as weekday (weekday)}
+								{#each weekdays as weekday, i (i)}
 									<RangeCalendar.HeadCell>
 										{weekday.slice(0, 2)}
 									</RangeCalendar.HeadCell>

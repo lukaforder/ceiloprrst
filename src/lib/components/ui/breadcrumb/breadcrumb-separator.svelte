@@ -1,8 +1,7 @@
 <script lang="ts">
+	import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
 	import { cn, type WithElementRef } from "$lib/utils.js";
 	import type { HTMLLiAttributes } from "svelte/elements";
-	import { HugeiconsIcon } from "@hugeicons/svelte"
-	import { ArrowRight01Icon } from '@hugeicons/core-free-icons';
 
 	let {
 		ref = $bindable(null),
@@ -23,6 +22,6 @@
 	{#if children}
 		{@render children?.()}
 	{:else}
-		<HugeiconsIcon icon={ArrowRight01Icon} strokeWidth={2}  />
+		<ChevronRightIcon class="cn-rtl-flip" />
 	{/if}
 </li>

@@ -1,10 +1,9 @@
 <script lang="ts">
-	import type { WithoutChildren } from "bits-ui";
-	import { getEmblaContext } from "./context.js";
-	import { cn } from "$lib/utils.js";
+	import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
 	import { Button, type Props } from "$lib/components/ui/button/index.js";
-	import { HugeiconsIcon } from "@hugeicons/svelte"
-	import { ArrowRight01Icon } from '@hugeicons/core-free-icons';
+	import { cn } from "$lib/utils.js";
+	import { getEmblaContext } from "./context.js";
+	import type { WithoutChildren } from "bits-ui";
 
 	let {
 		ref = $bindable(null),
@@ -24,9 +23,9 @@
 	aria-disabled={!emblaCtx.canScrollNext}
 	disabled={!emblaCtx.canScrollNext}
 	class={cn(
-		"rounded-full absolute touch-manipulation",
+		"absolute touch-manipulation",
 		emblaCtx.orientation === "horizontal"
-			? "-end-12 top-1/2 -translate-y-1/2"
+			? "inset-y-0 -end-12 my-auto"
 			: "start-1/2 -bottom-12 -translate-x-1/2 rotate-90",
 		className
 	)}
@@ -35,6 +34,6 @@
 	bind:ref
 	{...restProps}
 >
-	<HugeiconsIcon icon={ArrowRight01Icon} strokeWidth={2}  />
+	<ChevronRightIcon class="cn-rtl-flip" />
 	<span class="sr-only">Next slide</span>
 </Button>
