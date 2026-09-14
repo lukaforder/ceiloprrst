@@ -68,5 +68,6 @@
 		"blurhash": "^2.0.5",
 		"mode-watcher": "^1.1.0",
 		"motion-sv": "^0.1.13"
-	}
+	},
+	"packageManager": "yarn@4.18.0"
 }
