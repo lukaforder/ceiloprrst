@@ -1,5 +1,4 @@
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-
 mod video_stream;
 
 use video_stream::VideoStreamServer;
@@ -26,10 +25,7 @@ fn register_video_stream(
 }
 
 #[tauri::command]
-fn move_file_to_folder(
-    file_path: String,
-    folder_name: String,
-) -> Result<String, String> {
+fn move_file_to_folder(file_path: String, folder_name: String) -> Result<String, String> {
     use std::fs;
     use std::path::PathBuf;
 
@@ -50,8 +46,7 @@ fn move_file_to_folder(
 
     let destination = destination_dir.join(file_name);
 
-    fs::rename(&file_path, &destination)
-        .map_err(|e| format!("Failed to move file: {e}"))?;
+    fs::rename(&file_path, &destination).map_err(|e| format!("Failed to move file: {e}"))?;
 
     Ok(destination.to_string_lossy().into_owned())
 }
@@ -81,27 +76,25 @@ fn undo_move_file(file_path: String) -> Result<String, String> {
 
     let destination = original_dir.join(file_name);
 
-    fs::rename(&file_path, &destination)
-        .map_err(|e| format!("Failed to restore file: {e}"))?;
+    fs::rename(&file_path, &destination).map_err(|e| format!("Failed to restore file: {e}"))?;
 
     Ok(destination.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
-fn unregister_video_stream(
-    state: tauri::State<VideoStreamServer>,
-    token: String,
-) {
+fn unregister_video_stream(state: tauri::State<VideoStreamServer>, token: String) {
     state.unregister(&token);
 }
 
 pub fn run() {
-    let stream_server =
-        VideoStreamServer::start().expect("failed to start video stream server");
+    let stream_server = VideoStreamServer::start().expect("failed to start video stream server");
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_persisted_scope::init())
+        .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_persisted_scope::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(

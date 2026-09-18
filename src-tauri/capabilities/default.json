@@ -2,7 +2,9 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "enables the default permissions",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:path:default",
@@ -15,43 +17,84 @@
     "fs:scope-app-recursive",
     {
       "identifier": "fs:allow-mkdir",
-      "allow": [{ "path": "$APPCACHE/**" }]
+      "allow": [
+        {
+          "path": "$APPCACHE/**"
+        }
+      ]
     },
     {
       "identifier": "fs:allow-write-file",
-      "allow": [{ "path": "$APPCACHE/**" }]
+      "allow": [
+        {
+          "path": "$APPCACHE/**"
+        }
+      ]
     },
     {
       "identifier": "fs:allow-read-file",
-      "allow": [{ "path": "$APPCACHE/**" }]
+      "allow": [
+        {
+          "path": "$APPCACHE/**"
+        }
+      ]
     },
     {
       "identifier": "fs:allow-exists",
-      "allow": [{ "path": "$APPCACHE/**" }]
+      "allow": [
+        {
+          "path": "$APPCACHE/**"
+        }
+      ]
     },
     {
       "identifier": "fs:allow-read-text-file",
-      "allow": [{ "path": "$APPCACHE/**" }]
+      "allow": [
+        {
+          "path": "$APPCACHE/**"
+        }
+      ]
     },
     {
       "identifier": "fs:allow-write-text-file",
-      "allow": [{ "path": "$APPCACHE/**" }]
+      "allow": [
+        {
+          "path": "$APPCACHE/**"
+        }
+      ]
     },
     {
       "identifier": "fs:allow-mkdir",
-      "allow": [{ "path": "$APPCONFIG/**" }]
+      "allow": [
+        {
+          "path": "$APPCONFIG/**"
+        }
+      ]
     },
     {
       "identifier": "fs:allow-exists",
-      "allow": [{ "path": "$APPCONFIG/**" }]
+      "allow": [
+        {
+          "path": "$APPCONFIG/**"
+        }
+      ]
     },
     {
       "identifier": "fs:allow-read-text-file",
-      "allow": [{ "path": "$APPCONFIG/**" }]
+      "allow": [
+        {
+          "path": "$APPCONFIG/**"
+        }
+      ]
     },
     {
       "identifier": "fs:allow-write-text-file",
-      "allow": [{ "path": "$APPCONFIG/**" }]
-    }
+      "allow": [
+        {
+          "path": "$APPCONFIG/**"
+        }
+      ]
+    },
+    "store:default"
   ]
 }

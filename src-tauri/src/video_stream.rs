@@ -179,7 +179,11 @@ fn parse_range(value: &str) -> Option<(u64, u64)> {
 }
 
 fn guess_mime(path: &PathBuf) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).map(str::to_lowercase) {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase)
+    {
         Some(ext) if ext == "mp4" || ext == "m4v" => "video/mp4",
         Some(ext) if ext == "webm" => "video/webm",
         Some(ext) if ext == "mkv" => "video/x-matroska",

@@ -1,9 +1,27 @@
 <script lang="ts">
-	import { invoke } from '@tauri-apps/api/core';
 	import type { VideoItem } from '$lib/types';
 	import ArrowDown from '$lib/icons/arrow-down.svelte';
 	import ArrowUp from '$lib/icons/arrow-up.svelte';
 	import { toast } from 'svelte-sonner';
+	import {
+		SPEEDS,
+		SKIP_SMALL,
+		SKIP_LARGE,
+		FAST_FORWARD_MAX,
+		FAST_FORWARD_INTERVAL_MS,
+		SCRUB_SEEK_THROTTLE_MS,
+		REVERSE_STEP,
+		REVERSE_HOLD_DELAY,
+		REVERSE_INTERVAL_MS,
+		formatTime,
+		nextRampSpeed,
+		moveFileToFolder,
+		undoMoveFile,
+		registerVideoStream,
+		unregisterVideoStream,
+		createHoldTracker,
+		createHoldRepeater
+	} from '$lib/videoPlayer';
 
 	let {
 		video,
@@ -15,26 +33,13 @@
 		video: VideoItem;
 		videoIndex: number;
 		onClose: () => void;
-		onRequestNext?: () => Promise<{
-			index: number;
-			video: VideoItem;
-		} | null>;
+		onRequestNext?: () => Promise<{ index: number; video: VideoItem } | null>;
 		onVideoRestored?: (index: number, video: VideoItem, restoredPath: string) => void;
 	} = $props();
-
-	const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3, 4];
-	const SKIP_SMALL = 5;
-	const SKIP_LARGE = 10;
-	const FAST_FORWARD_MAX = 4;
-	const FAST_FORWARD_INTERVAL_MS = 120;
-	const SCRUB_SEEK_THROTTLE_MS = 80;
-
-	const RELEASE_GRACE_MS = 80;
 
 	let videoEl: HTMLVideoElement | undefined = $state();
 	let videoContainer: HTMLDivElement | undefined = $state();
 
-	// --- Local streaming source ---
 	let streamUrl: string | undefined = $state();
 	let streamToken: string | undefined;
 	let streamLoading = $state(false);
@@ -45,7 +50,7 @@
 		const requestId = ++streamRequestId;
 		const previousToken = streamToken;
 
-		clearAllHolds();
+		holdTracker.clearAll();
 		stopFastForward();
 		stopReverse();
 
@@ -54,15 +59,11 @@
 		streamError = false;
 
 		try {
-			const handle = await invoke<{ url: string; token: string }>('register_video_stream', {
-				path
-			});
-
+			const handle = await registerVideoStream(path);
 			if (requestId !== streamRequestId) {
-				invoke('unregister_video_stream', { token: handle.token }).catch(() => {});
+				unregisterVideoStream(handle.token).catch(() => {});
 				return;
 			}
-
 			streamUrl = handle.url;
 			streamToken = handle.token;
 		} catch (err) {
@@ -71,14 +72,10 @@
 				streamError = true;
 			}
 		} finally {
-			if (requestId === streamRequestId) {
-				streamLoading = false;
-			}
+			if (requestId === streamRequestId) streamLoading = false;
 		}
 
-		if (previousToken) {
-			invoke('unregister_video_stream', { token: previousToken }).catch(() => {});
-		}
+		if (previousToken) unregisterVideoStream(previousToken).catch(() => {});
 	}
 
 	let currentTime = $state(0);
@@ -89,112 +86,52 @@
 	let playbackRate = $state(1);
 	let bufferedEnd = $state(0);
 
-	let audioTracksList: {
-		id: string;
-		label: string;
-		language: string;
-	}[] = $state([]);
-
+	let audioTracksList: { id: string; label: string; language: string }[] = $state([]);
 	let selectedAudioTrackId = $state<string | null>(null);
 
 	let controlsVisible = $state(true);
 	let hideTimer: ReturnType<typeof setTimeout> | null = null;
 
-	// --- Speed dropdown ---
 	let speedMenuOpen = $state(false);
 	let speedMenuRef: HTMLDivElement | undefined = $state();
 
-	// --- Hold-to-fast-forward ---
 	let fastForwardActive = false;
 	let rampInterval: ReturnType<typeof setInterval> | null = null;
 	let rateBeforeHold: number | null = null;
+	let lastVol = $state(0);
 
-	// --- Hold-to-reverse ---
 	let reverseActive = false;
-	let reverseHoldTimer: ReturnType<typeof setTimeout> | null = null;
-	let reverseInterval: ReturnType<typeof setInterval> | null = null;
+	const reverseRepeater = createHoldRepeater(
+		() => {
+			if (!videoEl) return;
+			videoEl.currentTime = Math.max(0, videoEl.currentTime - REVERSE_STEP);
+			if (videoEl.currentTime <= 0) stopReverse();
+		},
+		REVERSE_HOLD_DELAY,
+		REVERSE_INTERVAL_MS
+	);
 
-	// --- Seek bar ---
 	let scrubbing = $state(false);
 	let resumeAfterScrub = false;
 	let lastScrubSeek = 0;
 
-	// --- Physical key-hold tracking ---
-	type HoldKey = 'ArrowRight' | 'ArrowLeft';
+	const holdTracker = createHoldTracker();
 
-	const activeHold: Partial<
-		Record<HoldKey, { releaseTimer: ReturnType<typeof setTimeout> | null }>
-	> = {};
-
-	function beginHold(key: HoldKey, onStart: () => void) {
-		const existing = activeHold[key];
-
-		if (existing) {
-			if (existing.releaseTimer) {
-				clearTimeout(existing.releaseTimer);
-				existing.releaseTimer = null;
-			}
-
-			return;
-		}
-
-		activeHold[key] = {
-			releaseTimer: null
-		};
-
-		onStart();
-	}
-
-	function endHold(key: HoldKey, onEnd: () => void) {
-		const existing = activeHold[key];
-
-		if (!existing) return;
-
-		existing.releaseTimer = setTimeout(() => {
-			delete activeHold[key];
-			onEnd();
-		}, RELEASE_GRACE_MS);
-	}
-
-	function clearAllHolds() {
-		for (const key of Object.keys(activeHold) as HoldKey[]) {
-			const entry = activeHold[key];
-
-			if (entry?.releaseTimer) {
-				clearTimeout(entry.releaseTimer);
-			}
-
-			delete activeHold[key];
-		}
-	}
+	let videoSwipeState = $state<'up' | 'down' | 'normal'>('normal');
 
 	function resetHideTimer() {
 		controlsVisible = true;
-
-		if (hideTimer) {
-			clearTimeout(hideTimer);
-		}
-
-		if (!paused) {
-			hideTimer = setTimeout(() => {
-				controlsVisible = false;
-			}, 2500);
-		}
+		if (hideTimer) clearTimeout(hideTimer);
+		if (!paused) hideTimer = setTimeout(() => (controlsVisible = false), 2500);
 	}
 
 	function togglePlay() {
 		if (!videoEl) return;
-
-		if (videoEl.paused) {
-			videoEl.play();
-		} else {
-			videoEl.pause();
-		}
+		videoEl.paused ? videoEl.play() : videoEl.pause();
 	}
 
 	function skip(seconds: number) {
 		if (!videoEl) return;
-
 		videoEl.currentTime = Math.min(
 			Math.max(videoEl.currentTime + seconds, 0),
 			duration || Infinity
@@ -220,21 +157,6 @@
 		}
 	}
 
-	// --- Fast forward ---
-
-	function nextRampSpeed(current: number): number {
-		const idx = SPEEDS.indexOf(current);
-		const startIdx = idx === -1 ? SPEEDS.findIndex((speed) => speed > current) : idx + 1;
-
-		if (startIdx === -1 || startIdx >= SPEEDS.length) {
-			return FAST_FORWARD_MAX;
-		}
-
-		return Math.min(FAST_FORWARD_MAX, SPEEDS[startIdx]);
-	}
-
-	let lastVol = $state(0);
-
 	function startFastForward() {
 		if (!videoEl || fastForwardActive) return;
 
@@ -243,25 +165,17 @@
 		fastForwardActive = true;
 		rateBeforeHold = playbackRate;
 
-		if (videoEl.paused) {
-			videoEl.play();
-		}
+		if (videoEl.paused) videoEl.play();
 
 		let rate = playbackRate;
-
 		clearRampInterval();
 
 		rampInterval = setInterval(() => {
 			if (!videoEl) return;
-
-			rate = nextRampSpeed(rate);
-
+			rate = nextRampSpeed(rate, FAST_FORWARD_MAX);
 			videoEl.playbackRate = rate;
 			playbackRate = rate;
-
-			if (rate >= FAST_FORWARD_MAX) {
-				clearRampInterval();
-			}
+			if (rate >= FAST_FORWARD_MAX) clearRampInterval();
 		}, FAST_FORWARD_INTERVAL_MS);
 	}
 
@@ -269,7 +183,6 @@
 		if (!fastForwardActive || !videoEl) return;
 
 		fastForwardActive = false;
-
 		clearRampInterval();
 
 		if (rateBeforeHold !== null) {
@@ -288,67 +201,27 @@
 		}
 	}
 
-	// --- Reverse playback ---
-
 	function startReverse() {
 		if (!videoEl || reverseActive) return;
-
 		reverseActive = true;
 		videoEl.pause();
-
-		const REVERSE_STEP = 0.5;
-		const HOLD_DELAY = 250;
-		const REVERSE_INTERVAL = 100;
-
-		const reverseStep = () => {
-			if (!videoEl || !reverseActive) return;
-
-			videoEl.currentTime = Math.max(0, videoEl.currentTime - REVERSE_STEP);
-
-			if (videoEl.currentTime <= 0) {
-				stopReverse();
-			}
-		};
-
-		reverseStep();
-
-		reverseHoldTimer = setTimeout(() => {
-			if (!reverseActive) return;
-
-			reverseInterval = setInterval(reverseStep, REVERSE_INTERVAL);
-		}, HOLD_DELAY);
+		reverseRepeater.start();
 	}
 
 	function stopReverse() {
 		reverseActive = false;
-
-		if (reverseHoldTimer !== null) {
-			clearTimeout(reverseHoldTimer);
-			reverseHoldTimer = null;
-		}
-
-		if (reverseInterval !== null) {
-			clearInterval(reverseInterval);
-			reverseInterval = null;
-		}
-
+		reverseRepeater.stop();
 		videoEl?.play();
 	}
-
-	// --- Swipe state ---
-
-	let videoSwipeState = $state<'up' | 'down' | 'normal'>('normal');
 
 	function handleArrowUp() {
 		if (!videoEl || !videoContainer) return;
 
 		if (videoSwipeState === 'normal') {
 			videoEl.pause();
-
 			videoContainer.style.width = '640px';
 			videoContainer.style.height = '360px';
 			videoContainer.style.transform = 'translate(0%, -10%)';
-
 			videoSwipeState = 'up';
 		} else if (videoSwipeState === 'down') {
 			videoEl.pause();
@@ -359,7 +232,6 @@
 
 	function resetVideoSize() {
 		if (!videoEl || !videoContainer) return;
-
 		videoContainer.style.width = '100%';
 		videoContainer.style.height = '100%';
 		videoContainer.style.transform = 'unset';
@@ -370,21 +242,14 @@
 
 		if (videoSwipeState === 'normal') {
 			videoEl.pause();
-
 			videoContainer.style.width = '640px';
 			videoContainer.style.height = '360px';
 			videoContainer.style.transform = 'translate(0%, 10%)';
-
 			videoSwipeState = 'down';
 		} else if (videoSwipeState === 'down') {
 			markForDiscard();
-
 			videoContainer.style.transform = 'translate(0%, 100%)';
-
-			// Do not await this. The player should immediately request the
-			// next unseen video.
-			void nextVideo();
-
+			void nextVideo(); // don't await: request next video immediately
 			resetVideoSize();
 			videoSwipeState = 'normal';
 		} else if (videoSwipeState === 'up') {
@@ -396,12 +261,9 @@
 
 	function onAudioTrackChange(id: string) {
 		if (!videoEl?.audioTracks) return;
-
 		for (let i = 0; i < videoEl.audioTracks.length; i++) {
-			const track = videoEl.audioTracks[i];
-			track.enabled = track.id === id;
+			videoEl.audioTracks[i].enabled = videoEl.audioTracks[i].id === id;
 		}
-
 		selectedAudioTrackId = id;
 	}
 
@@ -409,56 +271,25 @@
 		if (!videoEl?.audioTracks) return;
 
 		const list = [];
-
 		for (let i = 0; i < videoEl.audioTracks.length; i++) {
 			const track = videoEl.audioTracks[i];
-
-			list.push({
-				id: track.id,
-				label: track.label || `Track ${i + 1}`,
-				language: track.language
-			});
-
-			if (track.enabled) {
-				selectedAudioTrackId = track.id;
-			}
+			list.push({ id: track.id, label: track.label || `Track ${i + 1}`, language: track.language });
+			if (track.enabled) selectedAudioTrackId = track.id;
 		}
-
 		audioTracksList = list;
 	}
 
 	function updateBuffered() {
 		if (!videoEl || videoEl.buffered.length === 0) return;
-
 		bufferedEnd = videoEl.buffered.end(videoEl.buffered.length - 1);
 	}
 
-	// --- File discard / undo ---
-
-	async function moveFileToFolder(filePath: string, folderName: string): Promise<string> {
-		return await invoke<string>('move_file_to_folder', {
-			filePath,
-			folderName
-		});
-	}
-
-	async function undoMoveFile(filePath: string): Promise<string> {
-		return await invoke<string>('undo_move_file', {
-			filePath
-		});
-	}
-
 	function markForDiscard() {
-		// Capture everything needed NOW.
-		//
-		// The player may already be showing another video by the time
-		// the Undo button is pressed, so we must never use `video` from
-		// inside the later callback.
+		// Capture now: the player may already show another video by the time Undo is pressed.
 		const discardedVideo = video;
 		const discardedIndex = videoIndex;
-		const originalPath = discardedVideo.path;
 
-		moveFileToFolder(originalPath, 'discard')
+		moveFileToFolder(discardedVideo.path, 'discard')
 			.then((discardedPath) => {
 				toast.success('Video moved to discard folder.', {
 					action: {
@@ -466,13 +297,10 @@
 						onClick: async () => {
 							try {
 								const restoredPath = await undoMoveFile(discardedPath);
-
 								onVideoRestored?.(discardedIndex, discardedVideo, restoredPath);
-
 								toast.success('Video restored.');
 							} catch (error) {
 								console.error('Failed to restore video:', error);
-
 								toast.error(`Failed to restore video: ${error}`);
 							}
 						}
@@ -481,7 +309,6 @@
 			})
 			.catch((error) => {
 				console.error('Failed to move video to discard folder:', error);
-
 				toast.error(`Failed to move video to discard folder: ${error}`);
 			});
 	}
@@ -490,11 +317,9 @@
 		if (typeof onRequestNext === 'function') {
 			try {
 				const next = await onRequestNext();
-
 				if (next) {
 					video = next.video;
 					videoIndex = next.index;
-
 					await loadStream(next.video.path);
 					return;
 				}
@@ -502,32 +327,23 @@
 				console.error('onRequestNext failed', err);
 			}
 		}
-
 		onClose();
 	}
 
-	// --- Seek bar ---
-
 	function startScrub() {
 		if (!videoEl) return;
-
 		scrubbing = true;
 		resumeAfterScrub = !videoEl.paused;
-
 		videoEl.pause();
 		lastScrubSeek = 0;
 	}
 
 	function handleSeekInput(e: Event) {
-		const target = e.target as HTMLInputElement;
-		const value = Number(target.value);
-
+		const value = Number((e.target as HTMLInputElement).value);
 		currentTime = value;
-
 		if (!videoEl) return;
 
 		const now = performance.now();
-
 		if (now - lastScrubSeek >= SCRUB_SEEK_THROTTLE_MS) {
 			videoEl.currentTime = value;
 			lastScrubSeek = now;
@@ -535,31 +351,11 @@
 	}
 
 	function endScrub(e: Event) {
-		const target = e.target as HTMLInputElement;
-		const value = Number(target.value);
-
-		if (videoEl) {
-			videoEl.currentTime = value;
-		}
+		const value = Number((e.target as HTMLInputElement).value);
+		if (videoEl) videoEl.currentTime = value;
 
 		scrubbing = false;
-
-		if (resumeAfterScrub && videoEl) {
-			videoEl.play();
-		}
-	}
-
-	function formatTime(t: number): string {
-		if (!Number.isFinite(t)) return '0:00';
-
-		const h = Math.floor(t / 3600);
-		const m = Math.floor((t % 3600) / 60);
-		const s = Math.floor(t % 60);
-
-		const mm = h > 0 ? String(m).padStart(2, '0') : String(m);
-		const ss = String(s).padStart(2, '0');
-
-		return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+		if (resumeAfterScrub && videoEl) videoEl.play();
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -572,30 +368,14 @@
 
 			case 'ArrowRight':
 				e.preventDefault();
-
 				if (videoSwipeState !== 'normal') break;
-
-				beginHold('ArrowRight', () => {
-					if (e.shiftKey) {
-						skip(SKIP_SMALL);
-					} else {
-						startFastForward();
-					}
-				});
+				holdTracker.begin('ArrowRight', () => (e.shiftKey ? skip(SKIP_SMALL) : startFastForward()));
 				break;
 
 			case 'ArrowLeft':
 				e.preventDefault();
-
 				if (videoSwipeState !== 'normal') break;
-
-				beginHold('ArrowLeft', () => {
-					if (e.shiftKey) {
-						skip(-SKIP_SMALL);
-					} else {
-						startReverse();
-					}
-				});
+				holdTracker.begin('ArrowLeft', () => (e.shiftKey ? skip(-SKIP_SMALL) : startReverse()));
 				break;
 
 			case 'l':
@@ -608,20 +388,12 @@
 
 			case 'ArrowUp':
 				e.preventDefault();
-
-				if (!e.repeat) {
-					handleArrowUp();
-				}
-
+				if (!e.repeat) handleArrowUp();
 				break;
 
 			case 'ArrowDown':
 				e.preventDefault();
-
-				if (!e.repeat) {
-					handleArrowDown();
-				}
-
+				if (!e.repeat) handleArrowDown();
 				break;
 
 			case 'm':
@@ -629,28 +401,20 @@
 				break;
 
 			case 'Escape':
-				if (speedMenuOpen) {
-					speedMenuOpen = false;
-				} else {
-					onClose();
-				}
+				speedMenuOpen ? (speedMenuOpen = false) : onClose();
 				break;
 
 			case '>':
 			case '.': {
 				const index = SPEEDS.indexOf(playbackRate);
-
 				setSpeed(SPEEDS[Math.min(index + 1, SPEEDS.length - 1)]);
-
 				break;
 			}
 
 			case '<':
 			case ',': {
 				const index = SPEEDS.indexOf(playbackRate);
-
 				setSpeed(SPEEDS[Math.max(index - 1, 0)]);
-
 				break;
 			}
 		}
@@ -659,19 +423,12 @@
 	}
 
 	function handleKeyup(e: KeyboardEvent) {
-		switch (e.key) {
-			case 'ArrowRight':
-				endHold('ArrowRight', () => stopFastForward());
-				break;
-
-			case 'ArrowLeft':
-				endHold('ArrowLeft', () => stopReverse());
-				break;
-		}
+		if (e.key === 'ArrowRight') holdTracker.end('ArrowRight', stopFastForward);
+		else if (e.key === 'ArrowLeft') holdTracker.end('ArrowLeft', stopReverse);
 	}
 
 	function handleBlur() {
-		clearAllHolds();
+		holdTracker.clearAll();
 		stopFastForward();
 		stopReverse();
 	}
@@ -688,26 +445,18 @@
 			window.removeEventListener('blur', handleBlur);
 			window.removeEventListener('pointerdown', handleWindowPointerDown);
 
-			clearAllHolds();
+			holdTracker.clearAll();
 			stopFastForward();
 			stopReverse();
 
-			if (streamToken) {
-				invoke('unregister_video_stream', {
-					token: streamToken
-				}).catch(() => {});
-			}
+			if (streamToken) unregisterVideoStream(streamToken).catch(() => {});
 		};
 	});
 
-	// Register a new stream whenever the video changes.
 	$effect(() => {
-		if (video) {
-			loadStream(video.path);
-		}
+		if (video) loadStream(video.path);
 	});
 
-	// Start playback once the stream is attached.
 	$effect(() => {
 		if (videoEl && streamUrl) {
 			videoEl.currentTime = 0;
@@ -721,20 +470,28 @@
 		{#if videoSwipeState === 'up'}
 			<div class="fixed top-10 flex flex-col items-center gap-2">
 				<ArrowUp class="h-12 w-12" />
-				<p class="text-lg">send to klipr? :3</p>
+				<p class="text-lg">Next</p>
+			</div>
+			<div class="fixed bottom-10 flex flex-col items-center gap-2">
+				<ArrowUp class="h-12 w-12 rotate-180" />
+				<p class="text-lg">Back</p>
 			</div>
 			<div class="fixed top-1/2 left-10 flex flex-col items-center gap-2">
 				<ArrowDown class="h-12 w-12 rotate-90" />
-				<p class="text-lg">left to rename</p>
+				<p class="text-lg">Rename</p>
 			</div>
 			<div class="fixed top-1/2 right-10 flex flex-col items-center gap-2">
 				<ArrowDown class="h-12 w-12 -rotate-90" />
-				<p class="text-lg">right to keep</p>
+				<p class="text-lg">Send to Editor</p>
 			</div>
 		{:else if videoSwipeState === 'down'}
 			<div class="fixed bottom-10 flex flex-col items-center gap-2 text-destructive">
 				<ArrowDown class="h-12 w-12" />
 				<p class="text-lg">Press down again to move to discard folder.</p>
+			</div>
+			<div class="fixed top-10 flex flex-col items-center gap-2">
+				<ArrowDown class="h-12 w-12 rotate-180" />
+				<p class="text-lg">Back</p>
 			</div>
 		{/if}
 	</div>
@@ -752,21 +509,6 @@
 	bind:this={videoContainer}
 >
 	<div class="flex items-center justify-center gap-2" tabindex="-1">
-		{#if videoSwipeState !== 'normal'}
-			<div class="relative min-h-8 min-w-8 animate-bounce overflow-visible text-white">
-				<ArrowDown
-					class="absolute inset-0 h-8 w-8 {videoSwipeState === 'down'
-						? 'opacity-100'
-						: 'display-none opacity-0'}"
-				/>
-				<ArrowUp
-					class="absolute inset-0 h-8 w-8 {videoSwipeState === 'up'
-						? 'opacity-100'
-						: 'display-none opacity-0'}"
-				/>
-			</div>
-		{/if}
-
 		<div class="flex flex-col gap-2">
 			<video
 				bind:this={videoEl}
@@ -803,21 +545,6 @@
 				<p class="text-xs text-white/70">{video.path}</p>
 			{/if}
 		</div>
-
-		{#if videoSwipeState !== 'normal'}
-			<div class="relative min-h-8 min-w-8 animate-bounce overflow-visible text-white">
-				<ArrowDown
-					class="absolute inset-0 h-8 w-8 {videoSwipeState === 'down'
-						? 'opacity-100'
-						: 'display-none opacity-0'}"
-				/>
-				<ArrowUp
-					class="absolute inset-0 h-8 w-8 {videoSwipeState === 'up'
-						? 'opacity-100'
-						: 'display-none opacity-0'}"
-				/>
-			</div>
-		{/if}
 	</div>
 
 	{#if streamLoading}
@@ -860,21 +587,11 @@
 		</div>
 
 		<div class="flex items-center gap-3 text-sm text-white">
-			<button onclick={togglePlay} class="w-6">
-				{paused ? '▶' : '⏸'}
-			</button>
+			<button onclick={togglePlay} class="w-6">{paused ? '▶' : '⏸'}</button>
+			<button onclick={() => skip(-SKIP_LARGE)}>«{SKIP_LARGE}</button>
+			<button onclick={() => skip(SKIP_LARGE)}>{SKIP_LARGE}»</button>
 
-			<button onclick={() => skip(-SKIP_LARGE)}>
-				«{SKIP_LARGE}
-			</button>
-
-			<button onclick={() => skip(SKIP_LARGE)}>
-				{SKIP_LARGE}»
-			</button>
-
-			<span class="tabular-nums">
-				{formatTime(currentTime)} / {formatTime(duration)}
-			</span>
+			<span class="tabular-nums">{formatTime(currentTime)} / {formatTime(duration)}</span>
 
 			<div class="flex-1"></div>
 
@@ -917,17 +634,14 @@
 					class="rounded bg-white/10 px-2 py-1"
 				>
 					{#each audioTracksList as track (track.id)}
-						<option value={track.id}>
-							{track.label}
-							{track.language ? ` (${track.language})` : ''}
-						</option>
+						<option value={track.id}
+							>{track.label}{track.language ? ` (${track.language})` : ''}</option
+						>
 					{/each}
 				</select>
 			{/if}
 
-			<button onclick={() => (muted = !muted)}>
-				{muted || volume === 0 ? '🔇' : '🔊'}
-			</button>
+			<button onclick={() => (muted = !muted)}>{muted || volume === 0 ? '🔇' : '🔊'}</button>
 
 			<input
 				type="range"
@@ -938,9 +652,8 @@
 				class="w-20 accent-white"
 			/>
 
-			<button onclick={() => videoEl?.requestFullscreen()}> ⛶ </button>
-
-			<button onclick={onClose}> ✕ </button>
+			<button onclick={() => videoEl?.requestFullscreen()}>⛶</button>
+			<button onclick={onClose}>✕</button>
 		</div>
 	</div>
 </div>

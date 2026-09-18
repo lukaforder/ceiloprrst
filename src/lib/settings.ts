@@ -1,29 +1,22 @@
-import { appConfigDir, join } from '@tauri-apps/api/path';
-import { exists, mkdir, readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
+import { load } from '@tauri-apps/plugin-store';
 
 interface Settings {
 	lastFolder?: string;
 }
 
-let settingsPathPromise: Promise<string> | null = null;
+let storePromise: ReturnType<typeof load> | null = null;
 
-async function getSettingsPath(): Promise<string> {
-	if (!settingsPathPromise) {
-		settingsPathPromise = (async () => {
-			const dir = await appConfigDir();
-			if (!(await exists(dir))) await mkdir(dir, { recursive: true });
-			return join(dir, 'settings.json');
-		})();
+async function getStore() {
+	if (!storePromise) {
+		storePromise = load('settings.json');
 	}
-	return settingsPathPromise;
+	return storePromise;
 }
 
 export async function getLastFolder(): Promise<string | undefined> {
 	try {
-		const path = await getSettingsPath();
-		if (!(await exists(path))) return undefined;
-		const settings: Settings = JSON.parse(await readTextFile(path));
-		return settings.lastFolder;
+		const store = await getStore();
+		return await store.get<string>('lastFolder');
 	} catch {
 		return undefined;
 	}
@@ -31,8 +24,9 @@ export async function getLastFolder(): Promise<string | undefined> {
 
 export async function setLastFolder(folder: string): Promise<void> {
 	try {
-		const path = await getSettingsPath();
-		await writeTextFile(path, JSON.stringify({ lastFolder: folder }));
+		const store = await getStore();
+		await store.set('lastFolder', folder);
+		await store.save();
 	} catch {
 		// non-critical, ignore
 	}

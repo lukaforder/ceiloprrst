@@ -5,11 +5,13 @@
 	import { createVirtualizer } from '@tanstack/svelte-virtual';
 	import { get } from 'svelte/store';
 	import { fade } from 'svelte/transition';
+	import { onMount } from 'svelte';
 
 	import { Button } from '$lib/components/ui/button';
 	import * as Card from '$lib/components/ui/card';
 	import type { VideoItem } from '$lib/types';
 	import { createPool } from '$lib/concurrency';
+	import * as Dialog from '$lib/components/ui/dialog/index.js';
 
 	import {
 		getCachedThumbnail,
@@ -19,256 +21,132 @@
 	} from '$lib/thumbnailCache';
 
 	import { encodeBlurhashFromCanvas, blurhashToDataUrl } from '$lib/blurhash';
-
 	import { getLastFolder, setLastFolder } from '$lib/settings';
+
+	import { generateThumbnail } from '$lib/thumbnailGenerator';
+	import { createLazyVisibility } from '$lib/lazyVisibility';
+	import { createSessionPlayback } from '$lib/sessionPlayback';
+	import { computeColumns } from '$lib/layout';
+	import { createRecentPaths } from '$lib/recentPaths';
 
 	import VideoPlayer from '$lib/components/VideoPlayer.svelte';
 	import { MorphingText } from '$lib/components/magic/morphing-text';
 
-	let playingVideo = $state<VideoItem | null>(null);
-	let playingVideoIndex = $state<number | null>(null);
-
 	const VIDEO_EXT = ['mp4', 'mov', 'webm', 'mkv', 'avi'];
-
 	const MAX_CONCURRENT_THUMBNAILS = 4;
-	const THUMBNAIL_VISIBLE_DELAY = 150;
-	const SCROLL_IDLE_DELAY = 120;
-
 	const ROW_HEIGHT = 220;
 	const THUMB_WIDTH = 320;
+	const SCROLL_IDLE_DELAY = 120;
 
 	const pool = createPool(MAX_CONCURRENT_THUMBNAILS);
-
 	const loadingPaths = new Set<string>();
-	const intersectingPaths = new Set<string>();
-	const visibilityTimers = new Map<string, number>();
-	const pendingLoads = new Map<string, VideoItem>();
-	const observerCallbacks = new WeakMap<Element, VideoItem>();
+	const recentPathsStore = createRecentPaths();
 
-	let sharedObserver: IntersectionObserver | null = null;
+	let playingVideo = $state<VideoItem | null>(null);
+	let playingVideoIndex = $state<number | null>(null);
+	let videos = $state<VideoItem[]>([]);
+	let scanning = $state(false);
+	let scrollEl = $state<HTMLDivElement | undefined>(undefined);
+	let columns = $state(computeColumns(window.innerWidth));
+	let currentFolder = $state<string | null>(null);
+	let recentPaths = $state<string[]>([]);
 
 	let isScrolling = false;
 	let scrollIdleTimer: number | undefined;
 
-	let videos = $state<VideoItem[]>([]);
-	let scanning = $state(false);
-
-	let scrollEl = $state<HTMLDivElement | undefined>(undefined);
-
-	let columns = $state(5);
-	let currentFolder = $state<string | null>(null);
-
-	// -------------------------------------------------------------------------
-	// Session playback state
-	// -------------------------------------------------------------------------
-
-	/*
-	 * `videos` is the actual indexed catalogue used by the grid.
-	 *
-	 * We deliberately DO NOT remove items from this array when they are
-	 * discarded. Removing an item would shift every index after it and make
-	 * `seenIndexes` invalid.
-	 *
-	 * The Set is tiny compared with the VideoItem objects themselves and only
-	 * contains indexes encountered during this session.
-	 */
-	const seenIndexes = new Set<number>();
-
-	let totalVideoCount = $derived(videos.length);
-
-	function markIndexSeen(index: number) {
-		seenIndexes.add(index);
-	}
-
-	function getRandomUnseenIndex(): number | null {
-		if (totalVideoCount === 0) {
-			return null;
-		}
-
-		if (seenIndexes.size >= totalVideoCount) {
-			return null;
-		}
-
-		let index: number;
-
-		do {
-			index = Math.floor(Math.random() * totalVideoCount);
-		} while (seenIndexes.has(index));
-
-		seenIndexes.add(index);
-
-		return index;
-	}
-
-	function getVideoAtIndex(index: number): VideoItem | null {
-		return videos[index] ?? null;
-	}
-
-	async function requestNextVideo(): Promise<{
-		index: number;
-		video: VideoItem;
-	} | null> {
-		const index = getRandomUnseenIndex();
-
-		if (index === null) {
-			return null;
-		}
-
-		const video = getVideoAtIndex(index);
-
-		/*
-		 * This should only fail if the indexed catalogue changes underneath
-		 * us. Since we keep videos stable for the session, it normally cannot
-		 * happen.
-		 */
-		if (!video) {
-			return requestNextVideo();
-		}
-
-		return {
-			index,
-			video
-		};
-	}
-
-	// -------------------------------------------------------------------------
-	// Layout
-	// -------------------------------------------------------------------------
-
-	function computeColumns(): number {
-		const w = window.innerWidth;
-
-		if (w >= 1024) return 5;
-		if (w >= 768) return 4;
-		if (w >= 640) return 3;
-
-		return 2;
-	}
-
-	$effect(() => {
-		columns = computeColumns();
-
-		const onResize = () => {
-			columns = computeColumns();
-		};
-
-		window.addEventListener('resize', onResize);
-
-		return () => {
-			window.removeEventListener('resize', onResize);
-		};
+	const session = createSessionPlayback(() => videos);
+	const lazy = createLazyVisibility<VideoItem>({
+		getKey: (v) => v.path,
+		onVisible: loadThumb,
+		// svelte-ignore state_referenced_locally
+		root: scrollEl ?? null
 	});
 
+	onMount(async () => {
+		recentPaths = await recentPathsStore.get();
+	});
+
+	const totalVideoCount = $derived(videos.length);
 	const rowCount = $derived(Math.ceil(videos.length / columns));
 
 	const rowVirtualizer = createVirtualizer<HTMLDivElement, HTMLDivElement>({
 		count: 0,
-
 		getScrollElement: () => scrollEl ?? null,
-
 		estimateSize: () => ROW_HEIGHT,
-
 		overscan: 3
 	});
 
 	$effect(() => {
-		if (!scrollEl) return;
-
-		get(rowVirtualizer).setOptions({
-			getScrollElement: () => scrollEl ?? null
-		});
+		const onResize = () => (columns = computeColumns(window.innerWidth));
+		window.addEventListener('resize', onResize);
+		return () => window.removeEventListener('resize', onResize);
 	});
 
 	$effect(() => {
 		if (!scrollEl) return;
+		get(rowVirtualizer).setOptions({ getScrollElement: () => scrollEl ?? null });
+	});
 
+	$effect(() => {
+		if (!scrollEl) return;
 		const el = scrollEl;
 
 		const handleScroll = () => {
 			isScrolling = true;
+			lazy.setScrolling(true);
 
-			if (scrollIdleTimer !== undefined) {
-				clearTimeout(scrollIdleTimer);
-			}
+			if (scrollIdleTimer !== undefined) clearTimeout(scrollIdleTimer);
 
 			scrollIdleTimer = window.setTimeout(() => {
 				isScrolling = false;
+				lazy.setScrolling(false);
 				scrollIdleTimer = undefined;
-
-				flushPendingLoads();
+				lazy.flushPending();
 			}, SCROLL_IDLE_DELAY);
 		};
 
-		el.addEventListener('scroll', handleScroll, {
-			passive: true
-		});
+		el.addEventListener('scroll', handleScroll, { passive: true });
 
 		return () => {
 			el.removeEventListener('scroll', handleScroll);
-
-			if (scrollIdleTimer !== undefined) {
-				clearTimeout(scrollIdleTimer);
-			}
+			if (scrollIdleTimer !== undefined) clearTimeout(scrollIdleTimer);
 		};
 	});
 
 	$effect(() => {
-		const count = rowCount;
-
-		get(rowVirtualizer).setOptions({
-			count
-		});
+		get(rowVirtualizer).setOptions({ count: rowCount });
 	});
 
-	// -------------------------------------------------------------------------
-	// Folder scanning
-	// -------------------------------------------------------------------------
-
-	async function pickFolder() {
+	async function pickFolder(path?: string) {
 		const defaultPath = await getLastFolder();
+		const folder = path ?? (await open({ directory: true, multiple: false, defaultPath }));
 
-		const folder = await open({
-			directory: true,
-			multiple: false,
-			defaultPath
-		});
+		if (!folder || typeof folder !== 'string') return;
 
-		if (!folder || typeof folder !== 'string') {
-			return;
-		}
-
-		void setLastFolder(folder);
+		await setLastFolder(folder);
+		recentPaths = await recentPathsStore.add(folder);
 
 		scanning = true;
-
-		// Reset the current session.
 		videos = [];
-		seenIndexes.clear();
-
+		session.reset();
 		playingVideo = null;
 		playingVideoIndex = null;
-
 		currentFolder = folder;
 
 		const entries: DirEntry[] = await readDir(folder);
 
-		const list: VideoItem[] = entries
-			.filter((entry) => {
-				if (entry.isDirectory) return false;
-
-				const ext = entry.name.split('.').pop()?.toLowerCase();
-
-				return ext ? VIDEO_EXT.includes(ext) : false;
-			})
-			.map((entry) => ({
-				name: entry.name,
-				path: `${folder}/${entry.name}`,
+		videos = entries
+			.filter(
+				(e) => !e.isDirectory && VIDEO_EXT.includes(e.name.split('.').pop()?.toLowerCase() ?? '')
+			)
+			.map((e) => ({
+				name: e.name,
+				path: `${folder}/${e.name}`,
 				thumb: null,
 				blurhash: null,
 				blurhashUrl: null
 			}));
 
-		videos = list;
 		scanning = false;
 
 		const manifest = await loadFolderManifest(folder);
@@ -283,106 +161,13 @@
 		}
 	}
 
-	// -------------------------------------------------------------------------
-	// Thumbnails
-	// -------------------------------------------------------------------------
-
-	function flushPendingLoads() {
-		for (const item of pendingLoads.values()) {
-			if (intersectingPaths.has(item.path)) {
-				loadThumb(item);
-			}
-		}
-
-		pendingLoads.clear();
-	}
-
-	function getSharedObserver(): IntersectionObserver {
-		if (sharedObserver) return sharedObserver;
-
-		sharedObserver = new IntersectionObserver(
-			(entries) => {
-				for (const entry of entries) {
-					const item = observerCallbacks.get(entry.target);
-
-					if (!item) continue;
-
-					if (entry.isIntersecting) {
-						intersectingPaths.add(item.path);
-
-						const timer = window.setTimeout(() => {
-							visibilityTimers.delete(item.path);
-
-							if (!intersectingPaths.has(item.path)) {
-								return;
-							}
-
-							if (isScrolling) {
-								pendingLoads.set(item.path, item);
-							} else {
-								loadThumb(item);
-							}
-						}, THUMBNAIL_VISIBLE_DELAY);
-
-						visibilityTimers.set(item.path, timer);
-					} else {
-						intersectingPaths.delete(item.path);
-						pendingLoads.delete(item.path);
-
-						const existing = visibilityTimers.get(item.path);
-
-						if (existing !== undefined) {
-							clearTimeout(existing);
-							visibilityTimers.delete(item.path);
-						}
-					}
-				}
-			},
-			{
-				root: scrollEl ?? null,
-				threshold: 0.01
-			}
-		);
-
-		return sharedObserver;
-	}
-
-	function lazyThumb(node: HTMLElement, item: VideoItem) {
-		observerCallbacks.set(node, item);
-		getSharedObserver().observe(node);
-
-		return {
-			destroy() {
-				intersectingPaths.delete(item.path);
-				pendingLoads.delete(item.path);
-
-				const existing = visibilityTimers.get(item.path);
-
-				if (existing !== undefined) {
-					clearTimeout(existing);
-					visibilityTimers.delete(item.path);
-				}
-
-				sharedObserver?.unobserve(node);
-				observerCallbacks.delete(node);
-			}
-		};
-	}
-
 	async function loadThumb(item: VideoItem) {
-		if (item.thumb || loadingPaths.has(item.path)) {
-			return;
-		}
+		if (item.thumb || loadingPaths.has(item.path)) return;
 
 		loadingPaths.add(item.path);
 
 		await pool(async () => {
 			try {
-				if (isScrolling) {
-					pendingLoads.set(item.path, item);
-					return;
-				}
-
 				const cached = await getCachedThumbnail(item.path);
 
 				if (cached) {
@@ -390,200 +175,73 @@
 					return;
 				}
 
-				const result = await generateThumbnail(item.path);
+				const result = await generateThumbnail(
+					item.path,
+					convertFileSrc,
+					encodeBlurhashFromCanvas,
+					THUMB_WIDTH
+				);
 
 				if (!result) return;
 
-				const { dataUrl, blurhash } = result;
+				item.thumb = result.dataUrl;
+				item.blurhash = result.blurhash;
+				item.blurhashUrl = blurhashToDataUrl(result.blurhash);
 
-				item.thumb = dataUrl;
-				item.blurhash = blurhash;
-				item.blurhashUrl = blurhashToDataUrl(blurhash);
-
-				void saveCachedThumbnail(item.path, dataUrl);
-
-				if (currentFolder) {
-					recordBlurhash(currentFolder, item.name, blurhash);
-				}
+				void saveCachedThumbnail(item.path, result.dataUrl);
+				if (currentFolder) recordBlurhash(currentFolder, item.name, result.blurhash);
 			} finally {
 				loadingPaths.delete(item.path);
 			}
 		});
 	}
 
-	// -------------------------------------------------------------------------
-	// Start / navigation
-	// -------------------------------------------------------------------------
-
 	async function startSorting() {
 		if (!videos.length) return;
 
-		/*
-		 * Start with a random unseen video, exactly the same way that
-		 * "next" chooses one.
-		 */
-		const next = await requestNextVideo();
+		const next = session.requestNext();
+		if (!next) return;
 
-		if (!next) {
-			return;
-		}
-
-		playingVideo = next.video;
+		playingVideo = next.item;
 		playingVideoIndex = next.index;
+	}
+
+	function selectFromGrid(target: HTMLElement) {
+		const index = Number(target.dataset.videoIndex);
+		const item = videos[index];
+
+		if (!item) return;
+
+		session.markSeen(index);
+		playingVideo = item;
+		playingVideoIndex = index;
 	}
 
 	function handleGridClick(event: MouseEvent) {
 		const target = (event.target as HTMLElement).closest<HTMLElement>('[data-video-index]');
-
-		if (!target) return;
-
-		const index = Number(target.dataset.videoIndex);
-		const item = videos[index];
-
-		if (!item) return;
-
-		/*
-		 * Manually opening a video counts as seeing it too.
-		 * This prevents "Next" from returning the same video.
-		 */
-		markIndexSeen(index);
-
-		playingVideo = item;
-		playingVideoIndex = index;
+		if (target) selectFromGrid(target);
 	}
 
 	function handleGridKeydown(event: KeyboardEvent) {
-		if (event.key !== 'Enter' && event.key !== ' ') {
-			return;
-		}
+		if (event.key !== 'Enter' && event.key !== ' ') return;
 
 		const target = (event.target as HTMLElement).closest<HTMLElement>('[data-video-index]');
-
 		if (!target) return;
 
 		event.preventDefault();
-
-		const index = Number(target.dataset.videoIndex);
-		const item = videos[index];
-
-		if (!item) return;
-
-		markIndexSeen(index);
-
-		playingVideo = item;
-		playingVideoIndex = index;
+		selectFromGrid(target);
 	}
-
-	// -------------------------------------------------------------------------
-	// Undo
-	// -------------------------------------------------------------------------
 
 	function handleVideoRestored(index: number, video: VideoItem, restoredPath: string) {
-		/*
-		 * The video was never removed from `videos`, so its original index
-		 * remains valid.
-		 *
-		 * We replace the object rather than mutating the old object. This
-		 * keeps the parent as the source of truth.
-		 */
-		if (videos[index] === video) {
-			videos[index] = {
-				...video,
-				path: restoredPath
-			};
-		} else {
-			/*
-			 * Fallback in case the object reference changed for some reason.
-			 * The index is still the primary identity for this session.
-			 */
-			const existing = videos[index];
-
-			if (existing) {
-				videos[index] = {
-					...existing,
-					path: restoredPath
-				};
-			}
-		}
-
-		/*
-		 * Do NOT remove the index from seenIndexes.
-		 *
-		 * Undo means "restore the file", not "pretend this video was never
-		 * reviewed". It should therefore remain excluded from automatic Next.
-		 */
-	}
-
-	// -------------------------------------------------------------------------
-	// Thumbnail generation
-	// -------------------------------------------------------------------------
-
-	function generateThumbnail(path: string): Promise<{
-		dataUrl: string;
-		blurhash: string;
-	} | null> {
-		return new Promise((resolve) => {
-			const url = convertFileSrc(path);
-
-			const video = document.createElement('video');
-
-			video.src = url;
-			video.muted = true;
-			video.crossOrigin = 'anonymous';
-			video.preload = 'metadata';
-
-			const cleanup = (
-				result: {
-					dataUrl: string;
-					blurhash: string;
-				} | null
-			) => {
-				video.remove();
-				resolve(result);
-			};
-
-			video.addEventListener('loadedmetadata', () => {
-				video.currentTime = Math.min(1, video.duration / 2);
-			});
-
-			video.addEventListener('seeked', () => {
-				const canvas = document.createElement('canvas');
-
-				const scale = THUMB_WIDTH / video.videoWidth;
-
-				canvas.width = THUMB_WIDTH;
-				canvas.height = video.videoHeight * scale;
-
-				const ctx = canvas.getContext('2d');
-
-				if (!ctx) {
-					cleanup(null);
-					return;
-				}
-
-				ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-				const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
-
-				const blurhash = encodeBlurhashFromCanvas(canvas);
-
-				cleanup({
-					dataUrl,
-					blurhash
-				});
-			});
-
-			video.addEventListener('error', () => {
-				cleanup(null);
-			});
-		});
+		const existing = videos[index] === video ? video : videos[index];
+		if (existing) videos[index] = { ...existing, path: restoredPath };
 	}
 </script>
 
 <div class="flex h-full min-h-0 flex-col {playingVideo ? 'pointer-events-none opacity-0' : ''}">
 	<header class="sticky top-0 z-10 shrink-0 bg-background/80 backdrop-blur">
 		<div class="flex items-center gap-3 bg-sidebar p-2">
-			<Button onclick={pickFolder} disabled={scanning}>
+			<Button onclick={() => pickFolder()} disabled={scanning}>
 				{#if scanning}
 					Scanning...
 				{:else if currentFolder}
@@ -593,7 +251,7 @@
 				{/if}
 			</Button>
 
-			<Button onclick={pickFolder} disabled={scanning}>
+			<Button onclick={() => pickFolder()} disabled={scanning}>
 				{scanning ? 'Scanning...' : 'Change discard folder'}
 			</Button>
 
@@ -604,38 +262,77 @@
 			>
 				Start
 			</Button>
+
+			<Dialog.Root>
+				<Dialog.Trigger>Settings</Dialog.Trigger>
+				<Dialog.Content>
+					<Dialog.Header>
+						<Dialog.Title>Settings</Dialog.Title>
+						<Dialog.Description>
+							<ol>
+								<li>Volume on fast forward</li>
+								<li>Fast forward speed</li>
+								<li>Delete stored thumbnails (count & size)</li>
+								<li>Theme</li>
+								<li>Generate blurhash for thumbnails</li>
+								<li>Generate thumbnails for videos</li>
+								<li>Store generated thumbnails</li>
+							</ol>
+						</Dialog.Description>
+					</Dialog.Header>
+				</Dialog.Content>
+			</Dialog.Root>
 		</div>
 	</header>
 
 	{#if videos.length === 0 && !scanning && !currentFolder}
 		<Card.Root class="m-auto w-full max-w-lg pt-4">
+			<ol class="absolute left-10">
+				<li class="text-lg text-foreground/50">Recent locations</li>
+				{#each recentPaths as path (path)}
+					<li class="group w-fit justify-center">
+						<button
+							class="absolute -left-4 items-center text-destructive/50 opacity-0 transition-all group-hover:opacity-100"
+							onclick={async () => {
+								recentPaths = await recentPathsStore.remove(path);
+							}}>X</button
+						>
+						<button
+							onclick={() => pickFolder(path)}
+							class="relative items-center p-0 text-foreground/50 underline underline-offset-4 hover:text-foreground"
+							>{path}</button
+						>
+					</li>
+				{:else}
+					<li class="text-foreground/30">none</li>
+				{/each}
+			</ol>
 			<Card.Header>
 				<MorphingText texts={['ceiloprrst', 'clipsorter']} class="mb-2" />
-
 				<Card.Description>
 					is a video clip sorter application designed to help users rapidly sort through large
 					amounts of video clips and footage!
 				</Card.Description>
 			</Card.Header>
-
 			<Card.Content class="mt-4 flex flex-col gap-2 text-muted-foreground *:text-sm">
 				<p>how to use:</p>
-
 				<ul class="list-decimal pl-5">
 					<li>
 						press "Select folder" to choose a directory containing all your clips and videos you
 						wish to sort
 					</li>
-
 					<li>optionally set a custom discard folder location</li>
-
 					<li>press start</li>
 				</ul>
 			</Card.Content>
-
-			<Card.Footer>
+			<Card.Footer class="group flex flex-col">
 				<p class="mb-4 w-full text-sm font-extralight text-muted-foreground/40">
 					i choose to pronounce it as "see-lee-oh-prist"
+				</p>
+				<p
+					class="mb-4 w-full text-sm font-extralight text-muted-foreground/20 opacity-0 transition-opacity group-hover:opacity-100"
+				>
+					"ceiloprrst" is "clipsorter" alphabetically sorted
 				</p>
 			</Card.Footer>
 		</Card.Root>
@@ -690,7 +387,7 @@
 									role="button"
 									tabindex={0}
 								>
-									<div class="relative aspect-video overflow-hidden bg-muted" use:lazyThumb={v}>
+									<div class="relative aspect-video overflow-hidden bg-muted" use:lazy.action={v}>
 										{#if v.blurhashUrl}
 											<img
 												src={v.blurhashUrl}
@@ -706,9 +403,7 @@
 												src={v.thumb}
 												alt={v.name}
 												class="absolute inset-0 h-full w-full object-cover"
-												transition:fade={{
-													duration: 250
-												}}
+												transition:fade={{ duration: 250 }}
 											/>
 										{/if}
 									</div>
@@ -735,7 +430,10 @@
 	<VideoPlayer
 		video={playingVideo}
 		videoIndex={playingVideoIndex}
-		onRequestNext={requestNextVideo}
+		onRequestNext={async () => {
+			const next = session.requestNext();
+			return next ? { index: next.index, video: next.item } : null;
+		}}
 		onVideoRestored={handleVideoRestored}
 		onClose={() => {
 			playingVideo = null;
